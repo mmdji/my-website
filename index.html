@@ -302,6 +302,7 @@
 
     <script type="module">
         // --- DATA & STATE MANAGEMENT ---
+        const STORAGE_KEY = 'personal-finance-data';
         const state = {
             transactions: [],
             categories: {
@@ -311,6 +312,22 @@
             currency: 'تومان',
             charts: {}
         };
+        
+        // --- DATA PERSISTENCE ---
+        function saveDataToStorage() {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(state.transactions));
+        }
+
+        function loadDataFromStorage() {
+            const data = localStorage.getItem(STORAGE_KEY);
+            if (data) {
+                state.transactions = JSON.parse(data);
+            } else {
+                // If no data, generate sample data for the first time
+                generateSampleData();
+                saveDataToStorage();
+            }
+        }
 
         // --- SAMPLE DATA ---
         function generateSampleData() {
@@ -326,7 +343,6 @@
                 { id: 9, type: 'debt', from: 'دوست', amount: 500000, dueDate: dayjs().add(10, 'day').format('YYYY-MM-DD'), description: 'قرض از علی', paid: false },
                 { id: 10, type: 'credit', to: 'همکار', amount: 200000, dueDate: dayjs().add(5, 'day').format('YYYY-MM-DD'), description: 'قرض به سارا', paid: false },
             ];
-            // Simulate loading from a database
             state.transactions = sampleTransactions;
         }
 
@@ -362,7 +378,9 @@
         function renderRecentTransactions() {
             const container = getElement('#recent-transactions');
             container.innerHTML = '';
-            const recent = [...state.transactions]
+            const incomeAndExpense = state.transactions.filter(t => t.type === 'income' || t.type === 'expense');
+
+            const recent = [...incomeAndExpense]
                 .sort((a, b) => dayjs(b.date).diff(dayjs(a.date)))
                 .slice(0, 5);
 
@@ -435,12 +453,13 @@
             const tableBody = getElement('#transactions-table-body');
             tableBody.innerHTML = '';
 
-            if (filteredTransactions.length === 0) {
+            const transactionsToRender = filteredTransactions.filter(t => t.type === 'income' || t.type === 'expense');
+
+            if (transactionsToRender.length === 0) {
                 tableBody.innerHTML = `<tr><td colspan="6" class="text-center p-8 text-gray-500">هیچ تراکنشی یافت نشد.</td></tr>`;
                 return;
             }
 
-            const transactionsToRender = filteredTransactions.filter(t => t.type === 'income' || t.type === 'expense');
 
             transactionsToRender.forEach(t => {
                 const isIncome = t.type === 'income';
@@ -505,10 +524,14 @@
 
             // Monthly Trend Line Chart
             const monthlyCtx = getElement('#monthlyTrendChart').getContext('2d');
-            const monthlyData = state.transactions.reduce((acc, t) => {
+            const monthlyData = state.transactions
+                .filter(t => t.type === 'income' || t.type === 'expense')
+                .reduce((acc, t) => {
                 const month = dayjs(t.date).format('YYYY-MM');
                 if (!acc[month]) acc[month] = { income: 0, expense: 0 };
-                acc[month][t.type] += t.amount;
+                if(t.type === 'income' || t.type === 'expense') {
+                  acc[month][t.type] += t.amount;
+                }
                 return acc;
             }, {});
 
@@ -597,6 +620,7 @@
                 state.transactions.push(transactionData);
             }
 
+            saveDataToStorage();
             closeModal();
             renderAll();
         }
@@ -646,6 +670,7 @@
             themeToggle.addEventListener('click', () => {
                 document.documentElement.classList.toggle('dark');
                 const isDark = document.documentElement.classList.contains('dark');
+                localStorage.setItem('theme', isDark ? 'dark' : 'light');
                 themeIcon.setAttribute('data-lucide', isDark ? 'moon' : 'sun');
                 lucide.createIcons();
                 renderAll(); // Re-render charts with new theme colors
@@ -679,6 +704,7 @@
                     const id = e.currentTarget.dataset.id;
                     if (confirm('آیا از حذف این تراکنش مطمئن هستید؟')) {
                         state.transactions = state.transactions.filter(t => t.id != id);
+                        saveDataToStorage();
                         renderAll();
                     }
                 });
@@ -712,13 +738,14 @@
 
         // --- INITIALIZATION ---
         function init() {
-            // Set initial theme based on user preference
-            if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            // Set initial theme based on user preference or stored theme
+            const storedTheme = localStorage.getItem('theme');
+            if (storedTheme === 'dark' || (!storedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
                  document.documentElement.classList.add('dark');
                  getElement('#theme-icon').setAttribute('data-lucide', 'moon');
             }
 
-            generateSampleData();
+            loadDataFromStorage();
             setupEventListeners();
             renderAll();
             // Select dashboard by default
@@ -730,3 +757,4 @@
     </script>
 </body>
 </html>
+
