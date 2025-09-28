@@ -401,15 +401,21 @@
         const getElements = (selector) => document.querySelectorAll(selector);
 
         // --- UI & RENDERING FUNCTIONS ---
-        function renderAll() {
+        function updateUI() {
             const currentHash = window.location.hash || '#dashboard';
             
+            // Always update dashboard summary data as it affects all pages
             renderDashboard();
-            
-            if (currentHash === '#transactions') applyFilters();
-            if (currentHash === '#debts') renderDebtsPage();
-            if (currentHash === '#reports') getElement('#report-output').innerHTML = '<p class="text-center text-gray-500">برای مشاهده گزارش، یک ماه را انتخاب کرده و دکمه "تولید گزارش" را بزنید.</p>';
 
+            // Render content for the currently active page
+            switch(currentHash) {
+                case '#transactions':
+                    applyFilters();
+                    break;
+                case '#debts':
+                    renderDebtsPage();
+                    break;
+            }
             populateCategoryFilter();
             lucide.createIcons();
         }
@@ -517,15 +523,399 @@
             transactionsToRender.forEach(t => {
                 const isIncome = t.type === 'income';
                 const typeText = isIncome ? 'درآمد' : 'هزینه';
-// ... existing code ... -->
-            // Filtering
+                const typeColor = isIncome ? 'text-green-500' : 'text-red-500';
+                const amountSign = isIncome ? '+' : '-';
+                
+                const row = `
+                    <tr class="border-b dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                        <td class="p-4 font-semibold ${typeColor}">${typeText}</td>
+                        <td class="p-4">${t.category}</td>
+                        <td class="p-4 font-mono">${amountSign}${formatCurrency(t.amount)}</td>
+                        <td class="p-4">${dayjs(t.date).format('YYYY/MM/DD')}</td>
+                        <td class="p-4 hidden md:table-cell max-w-xs truncate">${t.description || '-'}</td>
+                        <td class="p-4">
+                            <div class="flex gap-2">
+                                <button class="edit-btn p-2 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-full" data-id="${t.id}">
+                                    <i data-lucide="pencil" class="w-4 h-4 text-blue-500"></i>
+                                </button>
+                                <button class="delete-btn p-2 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-full" data-id="${t.id}">
+                                    <i data-lucide="trash-2" class="w-4 h-4 text-red-500"></i>
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+                tableBody.insertAdjacentHTML('beforeend', row);
+            });
+            addTableButtonListeners('.edit-btn', '.delete-btn', openModal, handleDeleteTransaction);
+            lucide.createIcons();
+        }
+
+        function renderDebtsPage() {
+            const tableBody = getElement('#debts-table-body');
+            tableBody.innerHTML = '';
+            const debts = state.transactions
+                .filter(t => t.type === 'debt' || t.type === 'credit')
+                .sort((a,b) => (a.paid - b.paid) || dayjs(a.dueDate).diff(dayjs(b.dueDate)));
+            
+            if (debts.length === 0) {
+                tableBody.innerHTML = `<tr><td colspan="6" class="text-center p-8 text-gray-500">هیچ بدهی یا طلبی ثبت نشده است.</td></tr>`;
+                return;
+            }
+
+            debts.forEach(d => {
+                const isDebt = d.type === 'debt';
+                const typeText = isDebt ? 'بدهی' : 'طلب';
+                const typeColor = isDebt ? 'text-red-500' : 'text-green-500';
+                const statusText = d.paid ? `تسویه شده در ${dayjs(d.paidDate).format('YYYY/MM/DD')}` : 'پرداخت نشده';
+                const statusColor = d.paid ? 'text-gray-500' : 'text-yellow-500';
+                const rowClass = d.paid ? 'paid-row' : '';
+
+                const row = `
+                    <tr class="border-b dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50 ${rowClass}">
+                        <td class="p-4 font-semibold ${typeColor}">${typeText}</td>
+                        <td class="p-4">${d.person}</td>
+                        <td class="p-4 font-mono">${formatCurrency(d.amount)}</td>
+                        <td class="p-4">${dayjs(d.dueDate).format('YYYY/MM/DD')} (${dayjs(d.dueDate).fromNow()})</td>
+                        <td class="p-4 font-semibold ${statusColor}">${statusText}</td>
+                        <td class="p-4">
+                            <div class="flex gap-2">
+                                ${!d.paid ? `<button class="settle-btn p-2 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-full" data-id="${d.id}" title="تسویه حساب">
+                                    <i data-lucide="check-circle" class="w-4 h-4 text-green-500"></i>
+                                </button>` : ''}
+                                <button class="edit-debt-btn p-2 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-full" data-id="${d.id}" title="ویرایش">
+                                    <i data-lucide="pencil" class="w-4 h-4 text-blue-500"></i>
+                                </button>
+                                <button class="delete-debt-btn p-2 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-full" data-id="${d.id}" title="حذف">
+                                    <i data-lucide="trash-2" class="w-4 h-4 text-red-500"></i>
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+                tableBody.insertAdjacentHTML('beforeend', row);
+            });
+
+            addTableButtonListeners('.edit-debt-btn', '.delete-debt-btn', openDebtModal, handleDeleteTransaction);
+            getElements('.settle-btn').forEach(btn => btn.addEventListener('click', (e) => handleSettle(e.currentTarget.dataset.id)));
+            lucide.createIcons();
+        }
+
+        function renderCharts(income, expense) {
+            // Expense Category Pie Chart
+            const expenseCtx = getElement('#expenseCategoryChart').getContext('2d');
+            const expenseData = state.transactions
+                .filter(t => t.type === 'expense')
+                .reduce((acc, t) => {
+                    acc[t.category] = (acc[t.category] || 0) + t.amount;
+                    return acc;
+                }, {});
+
+            if (state.charts.expenseChart) state.charts.expenseChart.destroy();
+            state.charts.expenseChart = new Chart(expenseCtx, {
+                type: 'doughnut',
+                data: {
+                    labels: Object.keys(expenseData),
+                    datasets: [{
+                        data: Object.values(expenseData),
+                        backgroundColor: ['#ef4444', '#f97316', '#eab308', '#84cc16', '#22c55e', '#14b8a6', '#06b6d4', '#6366f1', '#a855f7'],
+                        borderColor: document.body.classList.contains('dark') ? '#1f2937' : '#ffffff',
+                        borderWidth: 2,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { position: 'bottom', labels: { color: document.body.classList.contains('dark') ? '#e5e7eb' : '#374151' } } }
+                }
+            });
+
+            // Monthly Trend Line Chart
+            const monthlyCtx = getElement('#monthlyTrendChart').getContext('2d');
+            const monthlyData = state.transactions
+                .filter(t => t.type === 'income' || t.type === 'expense')
+                .reduce((acc, t) => {
+                const month = dayjs(t.date).format('YYYY-MM');
+                if (!acc[month]) acc[month] = { income: 0, expense: 0 };
+                if(t.type === 'income' || t.type === 'expense') {
+                  acc[month][t.type] += t.amount;
+                }
+                return acc;
+            }, {});
+
+            const sortedMonths = Object.keys(monthlyData).sort();
+            
+            if (state.charts.monthlyChart) state.charts.monthlyChart.destroy();
+            state.charts.monthlyChart = new Chart(monthlyCtx, {
+                type: 'bar',
+                data: {
+                    labels: sortedMonths.map(m => dayjs(m).format('MMMM')),
+                    datasets: [
+                        { label: 'درآمد', data: sortedMonths.map(m => monthlyData[m].income), backgroundColor: 'rgba(34, 197, 94, 0.6)' },
+                        { label: 'هزینه', data: sortedMonths.map(m => monthlyData[m].expense), backgroundColor: 'rgba(239, 68, 68, 0.6)' }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    scales: {
+                        y: { ticks: { color: document.body.classList.contains('dark') ? '#9ca3af' : '#6b7280' } },
+                        x: { ticks: { color: document.body.classList.contains('dark') ? '#9ca3af' : '#6b7280' } }
+                    },
+                     plugins: { legend: { labels: { color: document.body.classList.contains('dark') ? '#e5e7eb' : '#374151' } } }
+                }
+            });
+        }
+
+        // --- MODAL & FORM HANDLING ---
+        const transactionModal = getElement('#transaction-modal');
+        const transactionForm = getElement('#transaction-form');
+        const debtModal = getElement('#debt-modal');
+        const debtForm = getElement('#debt-form');
+
+        function openModal(transaction = null) {
+            transactionForm.reset();
+            getElement('#transaction-id').value = '';
+            
+            if (transaction) {
+                getElement('#modal-title').textContent = 'ویرایش تراکنش';
+                getElement('#transaction-id').value = transaction.id;
+                getElement('#type').value = transaction.type;
+                updateCategoryOptions(transaction.type);
+                getElement('#category').value = transaction.category;
+                getElement('#amount').value = transaction.amount;
+                getElement('#date').value = transaction.date;
+                getElement('#description').value = transaction.description;
+            } else {
+                getElement('#modal-title').textContent = 'افزودن تراکنش جدید';
+                getElement('#date').value = dayjs().format('YYYY-MM-DD');
+                updateCategoryOptions('expense');
+            }
+            transactionModal.classList.remove('hidden');
+        }
+
+        function openDebtModal(debt = null) {
+            debtForm.reset();
+            getElement('#debt-id').value = '';
+
+            if(debt) {
+                getElement('#debt-modal-title').textContent = 'ویرایش بدهی/طلب';
+                getElement('#debt-id').value = debt.id;
+                getElement('#debt-type').value = debt.type;
+                getElement('#person').value = debt.person;
+                getElement('#debt-amount').value = debt.amount;
+                getElement('#due-date').value = debt.dueDate;
+                getElement('#debt-description').value = debt.description;
+            } else {
+                getElement('#debt-modal-title').textContent = 'ثبت بدهی/طلب جدید';
+                getElement('#due-date').value = dayjs().format('YYYY-MM-DD');
+            }
+            debtModal.classList.remove('hidden');
+        }
+
+        function closeModal(modal) {
+            modal.classList.add('hidden');
+        }
+
+        function handleTransactionFormSubmit(e) {
+            e.preventDefault();
+            const id = getElement('#transaction-id').value;
+            const formData = new FormData(transactionForm);
+            const data = {
+                type: formData.get('type'),
+                category: formData.get('category'),
+                amount: parseFloat(formData.get('amount')),
+                date: formData.get('date'),
+                description: formData.get('description'),
+            };
+
+            if (id) {
+                const index = state.transactions.findIndex(t => t.id == id);
+                state.transactions[index] = { ...state.transactions[index], ...data };
+            } else {
+                data.id = Date.now();
+                state.transactions.push(data);
+            }
+
+            saveDataToStorage();
+            closeModal(transactionModal);
+            updateUI();
+        }
+
+        function handleDebtFormSubmit(e) {
+            e.preventDefault();
+            const id = getElement('#debt-id').value;
+            const formData = new FormData(debtForm);
+            const personName = formData.get('person');
+            const data = {
+                type: formData.get('type'),
+                person: personName,
+                amount: parseFloat(formData.get('amount')),
+                dueDate: formData.get('dueDate'),
+                description: formData.get('description') || (formData.get('type') === 'debt' ? `بدهی به ${personName}`: `طلب از ${personName}`),
+                paid: false,
+                paidDate: null,
+            };
+
+            if (id) {
+                const index = state.transactions.findIndex(t => t.id == id);
+                state.transactions[index] = { ...state.transactions[index], ...data };
+            } else {
+                data.id = Date.now();
+                state.transactions.push(data);
+            }
+            
+            saveDataToStorage();
+            closeModal(debtModal);
+            updateUI();
+        }
+        
+        function updateCategoryOptions(type) {
+            const categorySelect = getElement('#category');
+            categorySelect.innerHTML = '';
+            state.categories[type].forEach(cat => {
+                const option = `<option value="${cat}">${cat}</option>`;
+                categorySelect.insertAdjacentHTML('beforeend', option);
+            });
+        }
+        
+        function populateCategoryFilter() {
+             const categoryFilter = getElement('#filter-category');
+             categoryFilter.innerHTML = '<option value="all">همه دسته‌بندی‌ها</option>';
+             const allCategories = new Set(state.transactions.map(t => t.category).filter(Boolean));
+             allCategories.forEach(cat => {
+                const option = `<option value="${cat}">${cat}</option>`;
+                categoryFilter.insertAdjacentHTML('beforeend', option);
+             });
+        }
+        
+        // --- EVENT LISTENERS & NAVIGATION ---
+        function navigateTo(hash) {
+            // Update the URL hash
+            window.location.hash = hash;
+
+            // Show/Hide the correct page section
+            getElements('.page').forEach(page => page.classList.add('hidden'));
+            getElement(hash).classList.remove('hidden');
+
+            // Update active link styles
+            getElements('.nav-link').forEach(l => l.classList.remove('active', 'bg-indigo-100', 'dark:bg-gray-700'));
+            getElement(`a[href="${hash}"]`).classList.add('active', 'bg-indigo-100', 'dark:bg-gray-700');
+
+            // Render the content for the new page
+            switch(hash) {
+                case '#dashboard':
+                    renderDashboard();
+                    break;
+                case '#transactions':
+                    applyFilters();
+                    break;
+                case '#reports':
+                    getElement('#report-output').innerHTML = '<p class="text-center text-gray-500">برای مشاهده گزارش، یک ماه را انتخاب کرده و دکمه "تولید گزارش" را بزنید.</p>';
+                    break;
+                case '#debts':
+                    renderDebtsPage();
+                    break;
+            }
+            lucide.createIcons(); // Refresh icons after rendering
+        }
+
+        function setupEventListeners() {
+            // Navigation
+            getElements('.nav-link').forEach(link => {
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    const targetId = link.getAttribute('href');
+                    navigateTo(targetId);
+                });
+            });
+
+            // Theme toggle
+            const themeToggle = getElement('#theme-toggle');
+            themeToggle.addEventListener('click', () => {
+                document.documentElement.classList.toggle('dark');
+                const isDark = document.documentElement.classList.contains('dark');
+                localStorage.setItem('theme', isDark ? 'dark' : 'light');
+                getElement('#theme-icon').setAttribute('data-lucide', isDark ? 'moon' : 'sun');
+                lucide.createIcons();
+                updateUI(); // Re-render charts with new theme colors
+            });
+
+            // Modal controls
+            getElement('#add-transaction-btn').addEventListener('click', () => openModal());
+            getElement('#add-debt-btn').addEventListener('click', () => openDebtModal());
+            transactionForm.addEventListener('submit', handleTransactionFormSubmit);
+            debtForm.addEventListener('submit', handleDebtFormSubmit);
+            getElement('#type').addEventListener('change', (e) => updateCategoryOptions(e.target.value));
+
+            getElements('.cancel-btn').forEach(btn => btn.addEventListener('click', (e) => {
+                const modal = e.target.closest('.fixed');
+                closeModal(modal);
+            }));
+            
+            // Filtering and Sorting
             getElement('#apply-filters').addEventListener('click', applyFilters);
             getElement('#sort-by').addEventListener('change', applyFilters);
 
             // Reports
             getElement('#generate-report-btn').addEventListener('click', generateReport);
             getElement('#export-csv-btn').addEventListener('click', exportToCSV);
-// ... existing code ... -->
+        }
+
+        function addTableButtonListeners(editSelector, deleteSelector, editFn, deleteFn) {
+            getElements(editSelector).forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const id = e.currentTarget.dataset.id;
+                    const transaction = state.transactions.find(t => t.id == id);
+                    editFn(transaction);
+                });
+            });
+
+            getElements(deleteSelector).forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const id = e.currentTarget.dataset.id;
+                    deleteFn(id);
+                });
+            });
+        }
+
+        function handleDeleteTransaction(id) {
+             if (confirm('آیا از حذف این مورد مطمئن هستید؟')) {
+                state.transactions = state.transactions.filter(t => t.id != id);
+                saveDataToStorage();
+                updateUI();
+            }
+        }
+
+        function handleSettle(id) {
+            const debtItem = state.transactions.find(t => t.id == id);
+            if(!debtItem || debtItem.paid) return;
+
+            if (confirm(`آیا از تسویه حساب به مبلغ ${formatCurrency(debtItem.amount)} مطمئن هستید؟ این عمل یک تراکنش جدید ثبت خواهد کرد.`)) {
+                debtItem.paid = true;
+                debtItem.paidDate = dayjs().format('YYYY-MM-DD');
+
+                const newTransaction = {
+                    id: Date.now(),
+                    amount: debtItem.amount,
+                    date: debtItem.paidDate,
+                };
+
+                if (debtItem.type === 'debt') { // I paid my debt
+                    newTransaction.type = 'expense';
+                    newTransaction.category = 'بازپرداخت بدهی';
+                    newTransaction.description = `پرداخت بدهی به ${debtItem.person}`;
+                } else { // I received my credit
+                    newTransaction.type = 'income';
+                    newTransaction.category = 'وصول طلب';
+                    newTransaction.description = `دریافت طلب از ${debtItem.person}`;
+                }
+                
+                state.transactions.push(newTransaction);
+                saveDataToStorage();
+                updateUI();
+            }
+        }
+
         function applyFilters() {
             const searchTerm = getElement('#search-input').value.toLowerCase();
             const typeFilter = getElement('#filter-type').value;
@@ -538,7 +928,12 @@
             if (searchTerm) {
                 filtered = filtered.filter(t => t.description && t.description.toLowerCase().includes(searchTerm));
             }
-// ... existing code ... -->
+            if (typeFilter !== 'all') {
+                filtered = filtered.filter(t => t.type === typeFilter);
+            }
+            if (categoryFilter !== 'all') {
+                filtered = filtered.filter(t => t.category === categoryFilter);
+            }
             if (monthFilter) {
                 filtered = filtered.filter(t => dayjs(t.date).format('YYYY-MM') === monthFilter);
             }
@@ -565,5 +960,96 @@
 
         function generateReport() {
             const month = getElement('#report-month').value;
-// ... existing code ... -->
+            const output = getElement('#report-output');
+            if(!month) {
+                output.innerHTML = '<p class="text-center text-red-500">لطفا یک ماه را برای گزارش‌گیری انتخاب کنید.</p>';
+                return;
+            }
+
+            const monthTransactions = state.transactions.filter(t => (t.type === 'income' || t.type === 'expense') && dayjs(t.date).format('YYYY-MM') === month);
+            
+            if(monthTransactions.length === 0) {
+                output.innerHTML = `<p class="text-center text-gray-500">هیچ تراکنشی برای ماه ${dayjs(month).format("MMMM YYYY")} یافت نشد.</p>`;
+                return;
+            }
+
+            const income = monthTransactions.filter(t => t.type === 'income').reduce((sum, t) => sum + t.amount, 0);
+            const expense = monthTransactions.filter(t => t.type === 'expense').reduce((sum, t) => sum + t.amount, 0);
+            const expenseByCategory = monthTransactions.filter(t => t.type === 'expense').reduce((acc, t) => {
+                acc[t.category] = (acc[t.category] || 0) + t.amount;
+                return acc;
+            }, {});
+
+            let reportHTML = `
+                <h3 class="text-xl font-bold">گزارش ماه ${dayjs(month).format("MMMM YYYY")}</h3>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-center">
+                    <div class="p-4 bg-green-100 dark:bg-green-900 rounded-lg"><p>مجموع درآمد</p><p class="font-bold text-lg">${formatCurrency(income)}</p></div>
+                    <div class="p-4 bg-red-100 dark:bg-red-900 rounded-lg"><p>مجموع هزینه</p><p class="font-bold text-lg">${formatCurrency(expense)}</p></div>
+                    <div class="p-4 bg-blue-100 dark:bg-blue-900 rounded-lg"><p>مانده</p><p class="font-bold text-lg">${formatCurrency(income-expense)}</p></div>
+                </div>
+                <div>
+                    <h4 class="font-bold mt-6 mb-2">ریز هزینه‌ها بر اساس دسته‌بندی</h4>
+                    <ul class="space-y-2">
+            `;
+            
+            Object.entries(expenseByCategory).sort(([,a],[,b]) => b-a).forEach(([category, amount]) => {
+                reportHTML += `<li class="flex justify-between p-2 bg-gray-50 dark:bg-gray-700/50 rounded-lg"><span>${category}</span><span class="font-mono">${formatCurrency(amount)}</span></li>`;
+            });
+
+            reportHTML += `</ul></div>`;
+            output.innerHTML = reportHTML;
+        }
+
+        function exportToCSV() {
+            const month = getElement('#report-month').value;
+            if(!month) {
+                alert('لطفا ابتدا یک ماه را انتخاب کرده و گزارش را تولید کنید.');
+                return;
+            }
+
+            const monthTransactions = state.transactions.filter(t => (t.type === 'income' || t.type === 'expense') && dayjs(t.date).format('YYYY-MM') === month);
+            if(monthTransactions.length === 0) {
+                alert('تراکنشی برای این ماه جهت خروجی گرفتن وجود ندارد.');
+                return;
+            }
+
+            let csvContent = "data:text/csv;charset=utf-8,";
+            csvContent += "نوع,دسته‌بندی,مبلغ,تاریخ,توضیحات\n";
+
+            monthTransactions.forEach(t => {
+                const row = [t.type, t.category, t.amount, t.date, `"${t.description || ''}"`].join(",");
+                csvContent += row + "\n";
+            });
+
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", `report-${month}.csv`);
+            document.body.appendChild(link); 
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        // --- INITIALIZATION ---
+        function init() {
+            // Set initial theme
+            const storedTheme = localStorage.getItem('theme');
+            if (storedTheme === 'dark' || (!storedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+                 document.documentElement.classList.add('dark');
+                 getElement('#theme-icon').setAttribute('data-lucide', 'moon');
+            }
+
+            loadDataFromStorage();
+            setupEventListeners();
+
+            // Handle page load and navigate to the correct hash
+            const currentHash = window.location.hash || '#dashboard';
+            navigateTo(currentHash);
+        }
+
+        // Run the app
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
 
